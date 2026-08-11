@@ -9,11 +9,13 @@
 # proxy), and collects results with runtime-tests-server.js in server mode.
 #
 # sim-remote (CLI + daemon) installs from the public sim-remote-releases
-# GitHub release — no secret needed for the download. One repository secret
-# remains (fork-only while experimental):
-#   SIM_REMOTE_TOKEN — credential for non-interactive orchestrator auth
-# The auth step is marked TODO(argent-cloud): the setup script performs no
-# login, so the exact mechanism (env var vs login verb) is still to confirm.
+# GitHub release — no secret needed for the download. Auth is ambient: the
+# daemon reads two environment variables, wired from repository secrets:
+#   SIM_ROUTER_USERNAME
+#   SIM_ROUTER_API_KEY
+# They are set at the job level (not per step) on purpose — the daemon is
+# spawned by whichever sim-remote call runs first and then outlives that
+# step, so every step must offer the same credentials.
 name: Runtime tests iOS (remote simulator)
 env:
   YARN_ENABLE_HARDENED_MODE: 0
@@ -50,12 +52,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      HAS_TOKEN: ${{ secrets.SIM_REMOTE_TOKEN != '' }}
+      HAS_USERNAME: ${{ secrets.SIM_ROUTER_USERNAME != '' }}
+      HAS_API_KEY: ${{ secrets.SIM_ROUTER_API_KEY != '' }}
     steps:
       - name: Check cloud credentials are configured
         run: |
-          if [ "$HAS_TOKEN" != "true" ]; then
-            echo "::error::SIM_REMOTE_TOKEN secret is not set — configure it in the repo settings before running this workflow"
+          if [ "$HAS_USERNAME" != "true" ] || [ "$HAS_API_KEY" != "true" ]; then
+            echo "::error::SIM_ROUTER_USERNAME and/or SIM_ROUTER_API_KEY secrets are not set — configure them in the repo settings before running this workflow"
             exit 1
           fi
 
@@ -121,6 +124,10 @@ jobs:
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+      # Job-level on purpose: the sim-remote daemon is spawned by the first
+      # CLI call and persists across steps — it must always see credentials.
+      SIM_ROUTER_USERNAME: ${{ secrets.SIM_ROUTER_USERNAME }}
+      SIM_ROUTER_API_KEY: ${{ secrets.SIM_ROUTER_API_KEY }}
     steps:
       - name: checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -144,12 +151,14 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/sim-remote" --version
 
-      - name: Authenticate sim-remote
-        env:
-          SIM_REMOTE_TOKEN: ${{ secrets.SIM_REMOTE_TOKEN }}
+      - name: Verify cloud connectivity
         run: |
-          # TODO(argent-cloud): replace with the real non-interactive auth verb.
-          sim-remote login --token "$SIM_REMOTE_TOKEN"
+          # No login verb — auth is ambient via SIM_ROUTER_USERNAME /
+          # SIM_ROUTER_API_KEY (job env). Listing devices proves the daemon
+          # can reach and authenticate against the router before we spend
+          # time on the artifact.
+          sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
+          echo "cloud reachable, credentials accepted"
 
       - name: Download app artifact
         uses: actions/download-artifact@448e3f862ab3ef47aa50ff917776823c9946035b
