@@ -152,13 +152,16 @@ jobs:
           # smoke check: the CLI has no --version flag; --help exits 0
           "$HOME/.local/bin/sim-remote" --help > /dev/null
 
-      - name: Verify cloud connectivity
+      - name: Log in and acquire a cloud machine
         run: |
-          # Listing devices proves the daemon can reach and authenticate 
-          # against the router before we spend time on the artifact.
-
+          # `sim-remote login` authenticates against sim-router AND acquires a
+          # Mac from the pool (waits up to 120 s for a free one by default).
+          # Credentials come from SIM_ROUTER_USERNAME / SIM_ROUTER_API_KEY in
+          # the job env — clap env fallbacks, so no flags needed.
+          sim-remote login
+          # The acquired machine's simulators are now visible:
           sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
-          echo "cloud reachable, credentials accepted"
+          echo "logged in, machine acquired"
 
       - name: Download app artifact
         uses: actions/download-artifact@448e3f862ab3ef47aa50ff917776823c9946035b
@@ -231,7 +234,11 @@ jobs:
         working-directory: ${{ env.WORKING_DIRECTORY }}
         run: |
           UDID="${{ steps.sim.outputs.udid }}"
-          if [ -n "$UDID" ] && command -v sim-remote >/dev/null; then
-            sim-remote proxy stop "$UDID" 8082 || true
-            sim-remote simctl shutdown "$UDID" || true
+          if command -v sim-remote >/dev/null; then
+            if [ -n "$UDID" ]; then
+              sim-remote proxy stop "$UDID" 8082 || true
+              sim-remote simctl shutdown "$UDID" || true
+            fi
+            # End the session and hand the machine back to the pool.
+            sim-remote logout || true
           fi
