@@ -16,6 +16,10 @@ name: Runtime tests iOS (split build/test)
 env:
   YARN_ENABLE_HARDENED_MODE: 0
 on:
+  # TEMP (fork testing only): run on every push of this branch.
+  push:
+    branches:
+      - ci/split-fork-test
   pull_request:
     paths:
       - .github/workflows/runtime-tests-ios-split.yml
@@ -37,7 +41,7 @@ concurrency:
 
 jobs:
   build-app:
-    if: github.repository == 'software-mansion/react-native-reanimated'
+    # TEMP (fork testing only): upstream repo guard removed so the job runs on forks.
     runs-on: macos-26
     timeout-minutes: 90
     env:
