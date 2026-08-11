@@ -149,7 +149,8 @@ jobs:
           curl -fsSL -o "$HOME/.local/bin/sim-remote-daemon" "$REL/sim-remote-daemon-$TARGET"
           chmod +x "$HOME/.local/bin/sim-remote" "$HOME/.local/bin/sim-remote-daemon"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/sim-remote" --version
+          # smoke check: the CLI has no --version flag; --help exits 0
+          "$HOME/.local/bin/sim-remote" --help > /dev/null
 
       - name: Verify cloud connectivity
         run: |
