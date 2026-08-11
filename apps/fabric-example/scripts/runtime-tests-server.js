@@ -847,6 +847,11 @@ if (SHOULD_LAUNCH) {
     printCommandFailure(error);
     shutdown(1);
   });
+} else if (!BUILD_ONLY) {
+  // Server mode: the app is launched externally (interactively, or by a
+  // remote-simulator driver), so there is no build/launch phase to wait out —
+  // arm the connect timeout right away.
+  armConnectTimer();
 }
 
 function printCommandFailure(error) {
