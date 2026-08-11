@@ -1,0 +1,227 @@
+# EXPERIMENTAL — iOS runtime tests with the test job on Ubuntu, driving a
+# remote simulator on argent cloud.
+#
+# Same artifact hand-off as runtime-tests-ios-split.yml, but run-tests runs on
+# ubuntu-latest with no simulator of its own: scripts/runtime-tests-remote.sh
+# uploads the app to the cloud sim over QUIC (sim-remote simctl install),
+# selects the library via launchd env (sim-remote setenv), reverse-tunnels the
+# app's ws://localhost:8082 reporting dial back to the runner (sim-remote
+# proxy), and collects results with runtime-tests-server.js in server mode.
+#
+# Requires two repository secrets (fork-only while experimental):
+#   SIM_REMOTE_DOWNLOAD_URL — where to fetch the Linux sim-remote binary
+#   SIM_REMOTE_TOKEN        — credential for non-interactive auth
+# The install/auth steps are marked TODO(argent-cloud): the exact download
+# channel and login verb come from the cloud team; adjust in place.
+name: Runtime tests iOS (remote simulator)
+env:
+  YARN_ENABLE_HARDENED_MODE: 0
+on:
+  # TEMP (fork testing only): run on every push of this branch.
+  push:
+    branches:
+      - ci/split-fork-test
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration (must be self-contained, i.e. Release*)
+        required: false
+        type: string
+        default: ReleaseRuntimeTests
+      udid:
+        description: Remote simulator UUID (blank = first available iPhone)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-tests-ios-remote-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fail in seconds — not after a 40-minute macOS build — when the cloud
+  # credentials aren't configured. (The secrets context is not available in
+  # job-level `if:`, hence the env indirection.)
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HAS_URL: ${{ secrets.SIM_REMOTE_DOWNLOAD_URL != '' }}
+      HAS_TOKEN: ${{ secrets.SIM_REMOTE_TOKEN != '' }}
+    steps:
+      - name: Check cloud credentials are configured
+        run: |
+          if [ "$HAS_URL" != "true" ] || [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::SIM_REMOTE_DOWNLOAD_URL and/or SIM_REMOTE_TOKEN secrets are not set — configure them in the repo settings before running this workflow"
+            exit 1
+          fi
+
+  build-app:
+    needs: preflight
+    # TEMP (fork testing only): upstream repo guard removed so the job runs on forks.
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      WORKING_DIRECTORY: apps/fabric-example
+      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Use Ruby version from `.ruby-version` file
+        uses: ruby/setup-ruby@6aaa311d81eba98ae12eaffbcb63296ace0efcde
+        with:
+          bundler-cache: true
+
+      - name: Install monorepo node dependencies
+        run: yarn install --immutable
+
+      - name: Build Reanimated package
+        working-directory: packages/react-native-reanimated
+        run: yarn build
+
+      - name: Install Pods
+        uses: ./.github/actions/install-pods
+        with:
+          working-directory: ${{ env.WORKING_DIRECTORY }}
+          pod-directory: ios
+
+      - name: Cache DerivedData
+        uses: ./.github/actions/cache-derived-data
+        with:
+          platform: ios
+          working-directory: ${{ env.WORKING_DIRECTORY }}
+          pod-directory: ios
+
+      - name: Build runtime-tests app
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: node scripts/runtime-tests-server.js --build-only --configuration "$CONFIGURATION"
+
+      - name: Package app artifact
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: node scripts/export-runtime-tests-app.js --configuration "$CONFIGURATION" --out dist/FabricExample.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}
+          path: apps/fabric-example/dist/FabricExample.app.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  run-tests-remote:
+    needs: build-app
+    runs-on: ubuntu-latest # <- the whole point: no macOS, no local simulator
+    timeout-minutes: 45
+    env:
+      WORKING_DIRECTORY: apps/fabric-example
+      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install monorepo node dependencies
+        run: yarn install --immutable
+
+      - name: Install sim-remote CLI
+        env:
+          SIM_REMOTE_DOWNLOAD_URL: ${{ secrets.SIM_REMOTE_DOWNLOAD_URL }}
+        run: |
+          # TODO(argent-cloud): replace with the real distribution channel for
+          # the Linux sim-remote binary once the cloud team confirms it.
+          if [ -z "$SIM_REMOTE_DOWNLOAD_URL" ]; then
+            echo "::error::SIM_REMOTE_DOWNLOAD_URL secret is not set — cannot install sim-remote"
+            exit 1
+          fi
+          curl -fsSL "$SIM_REMOTE_DOWNLOAD_URL" -o /usr/local/bin/sim-remote
+          chmod +x /usr/local/bin/sim-remote
+          sim-remote --version
+
+      - name: Authenticate sim-remote
+        env:
+          SIM_REMOTE_TOKEN: ${{ secrets.SIM_REMOTE_TOKEN }}
+        run: |
+          # TODO(argent-cloud): replace with the real non-interactive auth verb.
+          sim-remote login --token "$SIM_REMOTE_TOKEN"
+
+      - name: Download app artifact
+        uses: actions/download-artifact@448e3f862ab3ef47aa50ff917776823c9946035b
+        with:
+          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}
+          path: apps/fabric-example/dist
+
+      - name: Unpack app artifact
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          # unzip (not ditto — this is Linux); the zip was created with
+          # ditto --keepParent so it unpacks to unpacked/FabricExample.app
+          unzip -q dist/FabricExample.app.zip -d dist/unpacked
+
+      - name: Pick remote simulator and install app
+        id: sim
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        env:
+          INPUT_UDID: ${{ inputs.udid }}
+        run: |
+          UDID="$INPUT_UDID"
+          if [ -z "$UDID" ]; then
+            UDID=$(sim-remote simctl list devices --json \
+              | jq -r '[.devices[][] | select(.isAvailable != false)
+                        | select(.name | startswith("iPhone"))]
+                       | sort_by(.state != "Booted") | .[0].udid // empty')
+          fi
+          if [ -z "$UDID" ]; then
+            echo "::error::no available remote iPhone simulator found"
+            exit 1
+          fi
+          echo "using remote simulator $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          scripts/runtime-tests-remote.sh install --udid "$UDID" \
+            --app-path dist/unpacked/FabricExample.app
+
+      - name: Run ReJest self-tests on the remote simulator
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          scripts/runtime-tests-remote.sh run --udid "${{ steps.sim.outputs.udid }}"
+          --library self-tests --configuration "$CONFIGURATION"
+
+      - name: Verify CI catches failing tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          if scripts/runtime-tests-remote.sh run --udid "${{ steps.sim.outputs.udid }}" \
+            --library self-tests --configuration "$CONFIGURATION" \
+            --only "intentional failures";
+          then
+            echo "A failing suite did not fail the runner" && exit 1
+          else
+            echo "Failing tests correctly failed the runner"
+          fi
+
+      - name: Run Worklets runtime tests on the remote simulator
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          scripts/runtime-tests-remote.sh run --udid "${{ steps.sim.outputs.udid }}"
+          --library worklets --configuration "$CONFIGURATION"
+
+      - name: Run Reanimated runtime tests on the remote simulator
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          scripts/runtime-tests-remote.sh run --udid "${{ steps.sim.outputs.udid }}"
+          --library reanimated --configuration "$CONFIGURATION"
+
+      - name: Release remote simulator
+        if: always()
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          UDID="${{ steps.sim.outputs.udid }}"
+          if [ -n "$UDID" ] && command -v sim-remote >/dev/null; then
+            sim-remote proxy stop "$UDID" 8082 || true
+            sim-remote simctl shutdown "$UDID" || true
+          fi
