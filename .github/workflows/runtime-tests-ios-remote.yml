@@ -76,25 +76,48 @@ jobs:
         with:
           persist-credentials: false
 
+      # Skip the entire build when nothing that goes INTO the app changed —
+      # the packaged zip is cached keyed on a hash of the build inputs, so
+      # workflow-YAML iteration costs ~2 minutes instead of a full build.
+      # Computed right after checkout: the tree is clean (no node_modules),
+      # which keeps hashFiles fast and the key honest.
+      - name: Restore packaged app from cache
+        id: appcache
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
+        with:
+          path: apps/fabric-example/dist/FabricExample.app.zip
+          key: runtime-tests-app-zip-${{ env.CONFIGURATION }}-${{ hashFiles(
+            'yarn.lock',
+            'apps/fabric-example/**',
+            'apps/common-app/**',
+            'packages/react-native-reanimated/**',
+            'packages/react-native-worklets/**'
+            ) }}
+
       - name: Use Ruby version from `.ruby-version` file
+        if: steps.appcache.outputs.cache-hit != 'true'
         uses: ruby/setup-ruby@6aaa311d81eba98ae12eaffbcb63296ace0efcde
         with:
           bundler-cache: true
 
       - name: Install monorepo node dependencies
+        if: steps.appcache.outputs.cache-hit != 'true'
         run: yarn install --immutable
 
       - name: Build Reanimated package
+        if: steps.appcache.outputs.cache-hit != 'true'
         working-directory: packages/react-native-reanimated
         run: yarn build
 
       - name: Install Pods
+        if: steps.appcache.outputs.cache-hit != 'true'
         uses: ./.github/actions/install-pods
         with:
           working-directory: ${{ env.WORKING_DIRECTORY }}
           pod-directory: ios
 
       - name: Cache DerivedData
+        if: steps.appcache.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-derived-data
         with:
           platform: ios
@@ -102,10 +125,12 @@ jobs:
           pod-directory: ios
 
       - name: Build runtime-tests app
+        if: steps.appcache.outputs.cache-hit != 'true'
         working-directory: ${{ env.WORKING_DIRECTORY }}
         run: node scripts/runtime-tests-server.js --build-only --configuration "$CONFIGURATION"
 
       - name: Package app artifact
+        if: steps.appcache.outputs.cache-hit != 'true'
         working-directory: ${{ env.WORKING_DIRECTORY }}
         run: node scripts/export-runtime-tests-app.js --configuration "$CONFIGURATION" --out dist/FabricExample.app.zip
 
