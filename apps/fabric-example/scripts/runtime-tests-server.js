@@ -76,6 +76,9 @@ const UDID = args.udid ?? null;
 const SERIAL = args.serial ?? null;
 const AVD = args.avd ?? null;
 const SANITIZER = args.sanitizer ? String(args.sanitizer).toLowerCase() : null;
+const APP_PATH = args['app-path']
+  ? path.resolve(projectRoot, args['app-path'])
+  : null;
 
 if (!BUILD_ONLY && !LIBRARIES.includes(LIBRARY)) {
   console.error(
@@ -112,6 +115,23 @@ if (BUILD_ONLY && SHOULD_LAUNCH) {
   console.error(
     '[runtime-tests] --build-only cannot be combined with --launch'
   );
+  process.exit(1);
+}
+
+if (APP_PATH && PLATFORM !== 'ios') {
+  console.error('[runtime-tests] --app-path is only supported on iOS');
+  process.exit(1);
+}
+
+if (APP_PATH && BUILD_ONLY) {
+  console.error(
+    '[runtime-tests] --app-path cannot be combined with --build-only'
+  );
+  process.exit(1);
+}
+
+if (APP_PATH && !fs.existsSync(APP_PATH)) {
+  console.error(`[runtime-tests] --app-path: no app at ${APP_PATH}`);
   process.exit(1);
 }
 
@@ -613,7 +633,7 @@ async function appPath() {
 }
 
 async function installAndLaunch(udid) {
-  const app = await appPath();
+  const app = APP_PATH ?? (await appPath());
   if (SANITIZER) {
     assertSanitizerRuntimeEmbedded(app);
   }
@@ -817,7 +837,7 @@ if (SHOULD_LAUNCH) {
     } else {
       const device = await resolveSimulator();
       await ensureBooted(device);
-      if (!SKIP_BUILD) {
+      if (!SKIP_BUILD && !APP_PATH) {
         await buildApp();
       }
       await installAndLaunch(device.udid);
@@ -897,6 +917,10 @@ Build and run
                             the bundle and run without Metro.
   --skip-build              Reuse the installed app. Only safe when nothing
                             native changed - JS is served by Metro.
+  --app-path <path>         Install this prebuilt .app instead of building or
+                            resolving DerivedData (iOS only, implies
+                            --skip-build). Pass the --configuration the app was
+                            built with so Metro and port defaults line up.
   --launch                  Launch the app after installing it.
   --only <a,b>              Comma separated suite names to run. Suite names come
                             from the library's suites.ts, for example

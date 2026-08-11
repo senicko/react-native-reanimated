@@ -1,0 +1,152 @@
+# Experimental split build/test pipeline for the iOS runtime tests.
+#
+# Job 1 (build-app) builds the self-contained ReleaseRuntimeTests app and
+# uploads it as an artifact. Job 2 (run-tests) downloads that artifact on a
+# fresh runner — no Ruby, no CocoaPods, no Xcode build — installs it on a
+# simulator and runs the ReJest suites against it via --app-path.
+#
+# This is the stepping stone towards running the test half against a remote
+# simulator (argent): the artifact boundary and the prebuilt-app code path are
+# identical; only the machine that hosts the simulator changes.
+#
+# Deliberately workflow_dispatch-only for now (plus PR runs on edits to this
+# file), and deliberately without the retry-once pattern of runtime-tests-ios.yml
+# so flakes in the new path stay visible while we build trust in it.
+name: Runtime tests iOS (split build/test)
+env:
+  YARN_ENABLE_HARDENED_MODE: 0
+on:
+  pull_request:
+    paths:
+      - .github/workflows/runtime-tests-ios-split.yml
+      - apps/fabric-example/scripts/export-runtime-tests-app.js
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration (must be self-contained, i.e. Release*)
+        required: false
+        type: string
+        default: ReleaseRuntimeTests
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-tests-ios-split-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-app:
+    if: github.repository == 'software-mansion/react-native-reanimated'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      WORKING_DIRECTORY: apps/fabric-example
+      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Use Ruby version from `.ruby-version` file
+        uses: ruby/setup-ruby@6aaa311d81eba98ae12eaffbcb63296ace0efcde
+        with:
+          bundler-cache: true
+
+      - name: Install monorepo node dependencies
+        run: yarn install --immutable
+
+      - name: Build Reanimated package
+        working-directory: packages/react-native-reanimated
+        run: yarn build
+
+      - name: Install Pods
+        uses: ./.github/actions/install-pods
+        with:
+          working-directory: ${{ env.WORKING_DIRECTORY }}
+          pod-directory: ios
+
+      - name: Cache DerivedData
+        uses: ./.github/actions/cache-derived-data
+        with:
+          platform: ios
+          working-directory: ${{ env.WORKING_DIRECTORY }}
+          pod-directory: ios
+
+      - name: Build runtime-tests app
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: node scripts/runtime-tests-server.js --build-only --configuration "$CONFIGURATION"
+
+      - name: Package app artifact
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: node scripts/export-runtime-tests-app.js --configuration "$CONFIGURATION" --out dist/FabricExample.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-tests-app-${{ env.CONFIGURATION }}
+          path: apps/fabric-example/dist/FabricExample.app.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  run-tests:
+    needs: build-app
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      WORKING_DIRECTORY: apps/fabric-example
+      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      # Only the runner script's node dependencies (ws) are needed here —
+      # no Ruby, no Pods, no DerivedData: that is the point of the split.
+      - name: Install monorepo node dependencies
+        run: yarn install --immutable
+
+      - name: Download app artifact
+        uses: actions/download-artifact@448e3f862ab3ef47aa50ff917776823c9946035b
+        with:
+          name: runtime-tests-app-${{ env.CONFIGURATION }}
+          path: apps/fabric-example/dist
+
+      - name: Unpack app artifact
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: ditto -x -k dist/FabricExample.app.zip dist/unpacked
+
+      - name: Run ReJest self-tests against the prebuilt app
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          node scripts/runtime-tests-server.js --launch --library self-tests
+          --configuration "$CONFIGURATION" --app-path dist/unpacked/FabricExample.app
+          --connect-timeout 900 --idle-timeout 900
+
+      - name: Verify CI catches failing tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          if node scripts/runtime-tests-server.js --launch --library self-tests \
+            --configuration "$CONFIGURATION" --app-path dist/unpacked/FabricExample.app \
+            --connect-timeout 900 --idle-timeout 900 --only "intentional failures";
+          then
+            echo "A failing suite did not fail the runner" && exit 1
+          else
+            echo "Failing tests correctly failed the runner"
+          fi
+
+      - name: Run Worklets runtime tests against the prebuilt app
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          node scripts/runtime-tests-server.js --launch --library worklets
+          --configuration "$CONFIGURATION" --app-path dist/unpacked/FabricExample.app
+          --connect-timeout 900 --idle-timeout 900
+
+      - name: Run Reanimated runtime tests against the prebuilt app
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: >
+          node scripts/runtime-tests-server.js --launch --library reanimated
+          --configuration "$CONFIGURATION" --app-path dist/unpacked/FabricExample.app
+          --connect-timeout 900 --idle-timeout 900
