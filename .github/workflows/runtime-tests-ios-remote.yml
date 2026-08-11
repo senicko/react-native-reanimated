@@ -35,7 +35,7 @@ on:
         description: Remote simulator UUID (blank = first available iPhone)
         required: false
         type: string
-        default: ''
+        default: ""
 
 permissions:
   contents: read
@@ -153,10 +153,9 @@ jobs:
 
       - name: Verify cloud connectivity
         run: |
-          # No login verb — auth is ambient via SIM_ROUTER_USERNAME /
-          # SIM_ROUTER_API_KEY (job env). Listing devices proves the daemon
-          # can reach and authenticate against the router before we spend
-          # time on the artifact.
+          # Listing devices proves the daemon can reach and authenticate 
+          # against the router before we spend time on the artifact.
+
           sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
           echo "cloud reachable, credentials accepted"
 
@@ -171,6 +170,7 @@ jobs:
         run: |
           # unzip (not ditto — this is Linux); the zip was created with
           # ditto --keepParent so it unpacks to unpacked/FabricExample.app
+
           unzip -q dist/FabricExample.app.zip -d dist/unpacked
 
       - name: Pick remote simulator and install app
