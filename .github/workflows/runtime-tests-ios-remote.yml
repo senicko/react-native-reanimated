@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       configuration:
-        description: Build configuration (must be self-contained, i.e. Release*)
+        description: Build configuration (Debug* legs serve JS from Metro on the test runner)
         required: false
         type: string
         default: ReleaseRuntimeTests
@@ -64,19 +64,20 @@ jobs:
 
   build-app:
     needs: preflight
-    name: Build app (${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
+    name: Build app (${{ matrix.configuration }}, ${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
     runs-on: macos-26
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Pushes fan out over both bundle modes (like the local workflow's PR
-      # runs); workflow_call/dispatch collapse to the single input-selected
-      # leg so callers keep explicit control.
+      # Pushes fan out over both bundle modes and both configurations (the
+      # full remote-testable matrix); workflow_call/dispatch collapse to the
+      # single input-selected leg so callers keep explicit control.
       matrix:
         bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
+        configuration: ${{ fromJSON(github.event_name == 'push' && '["DebugRuntimeTests", "ReleaseRuntimeTests"]' || format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
-      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+      CONFIGURATION: ${{ matrix.configuration }}
     steps:
       - name: checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -150,7 +151,14 @@ jobs:
       - name: Package app artifact
         if: steps.appcache.outputs.cache-hit != 'true'
         working-directory: ${{ env.WORKING_DIRECTORY }}
-        run: node scripts/export-runtime-tests-app.js --configuration "$CONFIGURATION" --out dist/FabricExample.app.zip
+        run: |
+          # Debug apps are deliberately Metro-fed here (the test job runs
+          # Metro and tunnels it) — override the export script's guard.
+          EXPORT_FLAGS=""
+          case "$CONFIGURATION" in
+            Debug*) EXPORT_FLAGS="--allow-debug" ;;
+          esac
+          node scripts/export-runtime-tests-app.js --configuration "$CONFIGURATION" --out dist/FabricExample.app.zip $EXPORT_FLAGS
 
       - name: Upload app artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -162,7 +170,7 @@ jobs:
 
   run-tests-remote:
     needs: build-app
-    name: Remote tests (${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
+    name: Remote tests (${{ matrix.configuration }}, ${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
     runs-on: ubuntu-latest # <- the whole point: no macOS, no local simulator
     timeout-minutes: 45
     strategy:
@@ -173,9 +181,10 @@ jobs:
       max-parallel: 1
       matrix:
         bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
+        configuration: ${{ fromJSON(github.event_name == 'push' && '["DebugRuntimeTests", "ReleaseRuntimeTests"]' || format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
-      CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
+      CONFIGURATION: ${{ matrix.configuration }}
       # Job-level on purpose: the sim-remote daemon is spawned by the first
       # CLI call and persists across steps — it must always see credentials.
       SIM_ROUTER_USERNAME: ${{ secrets.SIM_ROUTER_USERNAME }}
@@ -188,6 +197,15 @@ jobs:
 
       - name: Install monorepo node dependencies
         run: yarn install --immutable
+
+      # Debug legs serve JS from Metro running on THIS runner, so this
+      # checkout's JS must match the native app's bundle mode: the build job
+      # toggled its own tree before compiling the Legacy binary, and Metro
+      # would otherwise serve Bundle Mode JS (the checked-in default) to it.
+      # Release legs never execute this checkout's JS — no toggle needed.
+      - name: Toggle Bundle Mode off (Legacy Eval Metro parity)
+        if: ${{ !matrix.bundleMode && startsWith(matrix.configuration, 'Debug') }}
+        run: yarn toggle-bundle-mode
 
       # CLI and daemon must be siblings — the CLI spawns
       # the daemon (which owns the QUIC session and the reverse tunnels)
@@ -287,6 +305,7 @@ jobs:
           if command -v sim-remote >/dev/null; then
             if [ -n "$UDID" ]; then
               sim-remote proxy stop "$UDID" 8082 || true
+              sim-remote proxy stop "$UDID" 8081 || true # Metro tunnel (Debug legs)
               sim-remote simctl shutdown "$UDID" || true
             fi
 
