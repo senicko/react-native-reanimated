@@ -16,18 +16,27 @@
 #   runtime-tests-remote.sh install --udid <UUID> --app-path <path/to/FabricExample.app>
 #   runtime-tests-remote.sh run     --udid <UUID> --library <reanimated|worklets|self-tests>
 #                                   [--configuration ReleaseRuntimeTests] [--only "<suites>"]
+#                                   [--metro-port <port>]
 #                                   [--connect-timeout <secs>] [--idle-timeout <secs>]
 #
 # `pick` prints the UDID of the best remote simulator (an explicit --udid
 # passes through; otherwise the first available iPhone, preferring booted);
 # `install` boots the sim and uploads the app (once per job);
 # `run` executes one library's suites (once per workflow step, like --launch).
+#
+# Debug* configurations are supported: the app loads its JS from a Metro
+# server on THIS host at launch. `run` then starts (or reuses) Metro on
+# --metro-port, opens a second reverse tunnel for it, and points the app at
+# it via RCT_jsLocation. The reporting port becomes metro-port + 1 — that is
+# how Debug apps derive it from their Metro URL.
 
 set -euo pipefail
 
 BUNDLE_ID="org.reactjs.native.example.FabricExample"
 WS_PORT=8082
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+METRO_LOG="${TMPDIR:-/tmp}/metro-runtime-tests.log"
 
 die() { echo "[runtime-tests-remote] $*" >&2; exit 1; }
 log() { echo "[runtime-tests-remote] $*"; }
@@ -39,7 +48,7 @@ SUBCOMMAND="${1:-}"
 shift
 
 UDID="" APP_PATH="" LIBRARY="" CONFIGURATION="ReleaseRuntimeTests"
-ONLY="" CONNECT_TIMEOUT=900 IDLE_TIMEOUT=900
+ONLY="" CONNECT_TIMEOUT=900 IDLE_TIMEOUT=900 METRO_PORT=8081
 while [ $# -gt 0 ]; do
   case "$1" in
     --udid) UDID="${2#remote:}"; shift 2 ;;
@@ -47,11 +56,55 @@ while [ $# -gt 0 ]; do
     --library) LIBRARY="$2"; shift 2 ;;
     --configuration) CONFIGURATION="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
+    --metro-port) METRO_PORT="$2"; shift 2 ;;
     --connect-timeout) CONNECT_TIMEOUT="$2"; shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
     *) die "unknown flag: $1" ;;
   esac
 done
+
+# Reverse tunnel: the sim's localhost:<port> -> this host. `proxy start`
+# errors with "tunnel already active" on re-runs — tolerate that (same
+# semantics as argent's proxyStart wrapper) so runs can blindly ensure
+# their tunnels exist.
+ensure_tunnel() {
+  local port="$1" out
+  log "ensuring reverse tunnel for port $port"
+  if ! out=$(sim-remote proxy start "$UDID" "$port" 2>&1); then
+    if echo "$out" | grep -qi "already"; then
+      log "tunnel already active on port $port"
+    else
+      echo "$out" >&2
+      die "proxy start failed for port $port"
+    fi
+  fi
+}
+
+metro_running() {
+  curl -sf "http://127.0.0.1:$METRO_PORT/status" 2>/dev/null \
+    | grep -q "packager-status:running"
+}
+
+# Start Metro on this host unless one is already serving. Mirrors the local
+# runner: --reset-cache because a Metro cache built under a different Bundle
+# Mode serves stale module maps. Left running on exit — later `run`
+# invocations (and re-runs) reuse it; CI job teardown reaps it.
+ensure_metro() {
+  if metro_running; then
+    log "Metro already running on :$METRO_PORT, reusing it"
+    return
+  fi
+  log "starting Metro on :$METRO_PORT (log: $METRO_LOG)"
+  (cd "$PROJECT_ROOT" && nohup yarn start --port "$METRO_PORT" --reset-cache > "$METRO_LOG" 2>&1 &)
+  for _ in $(seq 1 90); do
+    sleep 2
+    if metro_running; then
+      log "Metro is ready"
+      return
+    fi
+  done
+  die "Metro did not become ready within 180s (see $METRO_LOG)"
+}
 case "$SUBCOMMAND" in
   install | run)
     [ -n "$UDID" ] || die "--udid is required (bare UUID or remote:<UUID>)"
@@ -88,24 +141,26 @@ case "$SUBCOMMAND" in
 
   run)
     [ -n "$LIBRARY" ] || die "run requires --library"
+    IS_RELEASE=true
     case "$CONFIGURATION" in
       Release*) ;;
-      *) die "remote runs need a self-contained Release* configuration (got: $CONFIGURATION)" ;;
+      Debug*) IS_RELEASE=false ;;
+      *) die "unknown configuration: $CONFIGURATION (expected Debug*|Release*)" ;;
     esac
 
-    # Reverse tunnel: the sim's localhost:$WS_PORT -> this host. `proxy start`
-    # errors with "tunnel already active" when re-run for the same port —
-    # tolerate that (same semantics as argent's proxyStart wrapper) so each
-    # library run can blindly ensure the tunnel exists.
-    log "ensuring reverse tunnel for port $WS_PORT"
-    if ! PROXY_OUT=$(sim-remote proxy start "$UDID" "$WS_PORT" 2>&1); then
-      if echo "$PROXY_OUT" | grep -qi "already"; then
-        log "tunnel already active"
-      else
-        echo "$PROXY_OUT" >&2
-        die "proxy start failed"
-      fi
+    if ! $IS_RELEASE; then
+      # Debug apps load their JS from Metro at launch and derive their
+      # reporting WebSocket port as metro-port + 1 (from the Metro URL).
+      WS_PORT=$((METRO_PORT + 1))
+      ensure_metro
+      ensure_tunnel "$METRO_PORT"
+      # Explicitly point the app at this Metro (inside the sim, localhost
+      # means the remote Mac — the tunnel makes this address land here).
+      sim-remote spawn "$UDID" -- defaults write "$BUNDLE_ID" \
+        RCT_jsLocation "localhost:$METRO_PORT"
     fi
+
+    ensure_tunnel "$WS_PORT"
 
     log "selecting library '$LIBRARY' via launchd env"
     sim-remote setenv "$UDID" RUNTIME_TESTS_LIBRARY "$LIBRARY"
