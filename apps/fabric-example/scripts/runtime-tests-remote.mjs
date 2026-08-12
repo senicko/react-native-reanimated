@@ -18,27 +18,30 @@
 // how Debug apps derive it from their Metro URL.
 //
 // Usage:
-//   node runtime-tests-remote.js pick    [--udid <UUID>]
-//   node runtime-tests-remote.js install --udid <UUID> --app-path <path/to/FabricExample.app>
-//   node runtime-tests-remote.js run     --udid <UUID> --library <reanimated|worklets|self-tests>
-//                                        [--configuration ReleaseRuntimeTests] [--only "<suites>"]
-//                                        [--metro-port <port>]
-//                                        [--connect-timeout <secs>] [--idle-timeout <secs>]
+//   node runtime-tests-remote.mjs pick    [--udid <UUID>]
+//   node runtime-tests-remote.mjs install --udid <UUID> --app-path <path/to/FabricExample.app>
+//   node runtime-tests-remote.mjs run     --udid <UUID> --library <reanimated|worklets|self-tests>
+//                                         [--configuration ReleaseRuntimeTests] [--only "<suites>"]
+//                                         [--metro-port <port>]
+//                                         [--connect-timeout <secs>] [--idle-timeout <secs>]
 //
 // `pick` prints the UDID of the best remote simulator (an explicit --udid
 // passes through; otherwise the first available iPhone, preferring booted);
 // `install` boots the sim and uploads the app (once per job);
 // `run` executes one library's suites (once per workflow step, like --launch).
 
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const http = require('http');
-const { spawn, execFile, execFileSync } = require('child_process');
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import http from 'node:http';
+import { spawn, execFile, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 
 const BUNDLE_ID = 'org.reactjs.native.example.FabricExample';
-const projectRoot = path.resolve(__dirname, '..');
-const SERVER_SCRIPT = path.join(__dirname, 'runtime-tests-server.js');
+const projectRoot = path.resolve(scriptDir, '..');
+const SERVER_SCRIPT = path.join(scriptDir, 'runtime-tests-server.js');
 const METRO_LOG = path.join(os.tmpdir(), 'metro-runtime-tests.log');
 
 function fail(message) {
@@ -277,6 +280,8 @@ if (!subcommands[SUBCOMMAND]) {
   fail(`unknown subcommand: ${SUBCOMMAND ?? '(none)'} (expected pick | install | run)`);
 }
 assertSimRemote();
-subcommands[SUBCOMMAND]().catch((error) => {
+try {
+  await subcommands[SUBCOMMAND]();
+} catch (error) {
   fail(error.message);
-});
+}
