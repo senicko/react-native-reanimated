@@ -13,10 +13,6 @@ runs:
     - name: Install sim-remote CLI + daemon
       shell: bash
       run: |
-        # CLI and daemon must be siblings — the CLI spawns the daemon (which
-        # owns the QUIC session to the orchestrator and the reverse tunnels)
-        # from its own directory. They are one binary shipped under two
-        # names, dispatching on how it is invoked.
         case "$(uname -s)-$(uname -m)" in
           Darwin-arm64) TARGET=aarch64-apple-darwin ;;
           Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
@@ -26,11 +22,13 @@ runs:
             exit 1
             ;;
         esac
+
         REL="https://github.com/software-mansion/sim-remote-releases/releases/download/${{ inputs.release-tag }}"
         mkdir -p "$HOME/.local/bin"
         curl -fsSL -o "$HOME/.local/bin/sim-remote" "$REL/sim-remote-$TARGET"
         curl -fsSL -o "$HOME/.local/bin/sim-remote-daemon" "$REL/sim-remote-daemon-$TARGET"
         chmod +x "$HOME/.local/bin/sim-remote" "$HOME/.local/bin/sim-remote-daemon"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
         # smoke check: the CLI has no --version flag; --help exits 0
         "$HOME/.local/bin/sim-remote" --help > /dev/null
