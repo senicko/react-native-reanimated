@@ -68,9 +68,6 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Pushes fan out over both bundle modes and both configurations (the
-      # full remote-testable matrix); workflow_call/dispatch collapse to the
-      # single input-selected leg so callers keep explicit control.
       matrix:
         bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
         configuration: ${{ fromJSON(github.event_name == 'push' && '["DebugRuntimeTests", "ReleaseRuntimeTests"]' || format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
@@ -88,10 +85,16 @@ jobs:
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
         with:
           path: apps/fabric-example/dist/FabricExample.app.zip
+          # scripts/ is excluded: the driver/export/server scripts orchestrate
+          # builds and test runs but never ship inside the .app, so editing
+          # them must not invalidate four app caches. Caveat: a change to the
+          # xcodebuild flags inside runtime-tests-server.js would alter the
+          # app without changing this key — delete the caches manually then.
           key:
             runtime-tests-app-zip-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}-${{ hashFiles(
             'yarn.lock',
             'apps/fabric-example/**',
+            '!apps/fabric-example/scripts/**',
             'apps/common-app/**',
             'packages/react-native-reanimated/**',
             'packages/react-native-worklets/**'
@@ -107,9 +110,6 @@ jobs:
         if: steps.appcache.outputs.cache-hit != 'true'
         run: yarn install --immutable
 
-      # The repo tree ships with Bundle Mode applied; this reverts the
-      # patches for the Legacy Eval leg (same semantics as the local
-      # workflow's step of the same name).
       - name: Toggle Bundle Mode off (Legacy Eval)
         if: steps.appcache.outputs.cache-hit != 'true' && !matrix.bundleMode
         run: yarn toggle-bundle-mode
@@ -201,10 +201,6 @@ jobs:
       - name: Install sim-remote CLI + daemon
         uses: ./.github/actions/install-sim-remote
 
-      # `sim-remote login` authenticates against sim-router AND acquires a
-      # Mac from the pool (waits up to 120 s for a free one by default).
-      # Credentials come from SIM_ROUTER_USERNAME / SIM_ROUTER_API_KEY in
-      # the job env — clap env fallbacks, so no flags needed.
       - name: Log in and acquire a cloud machine
         shell: bash # explicit: adds pipefail, so the sim-remote|jq pipe can't hide a failure
         run: |
