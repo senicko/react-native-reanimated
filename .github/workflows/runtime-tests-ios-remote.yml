@@ -1,32 +1,7 @@
-# EXPERIMENTAL — iOS runtime tests with the test job on Ubuntu, driving a
-# remote simulator on argent cloud.
-#
-# Build job produces a self-contained app zip; run-tests-remote runs on
-# ubuntu-latest with no simulator of its own: scripts/runtime-tests-remote.sh
-# uploads the app to the cloud sim over QUIC (sim-remote simctl install),
-# selects the library via launchd env (sim-remote setenv), reverse-tunnels the
-# app's ws://localhost:8082 reporting dial back to the runner (sim-remote
-# proxy), and collects results with runtime-tests-server.js in server mode.
-#
-# sim-remote (CLI + daemon) installs from the public sim-remote-releases
-# GitHub release — no secret needed for the download. Auth is ambient: the
-# daemon reads two environment variables, wired from repository secrets:
-#   SIM_ROUTER_USERNAME
-#   SIM_ROUTER_API_KEY
-# They are set at the job level (not per step) on purpose — the daemon is
-# spawned by whichever sim-remote call runs first and then outlives that
-# step, so every step must offer the same credentials.
-#
-# Scope vs runtime-tests-ios.yml: Release* configurations only (Debug needs
-# Metro at app launch — possible over a tunnel, deliberately unsupported),
-# and no sanitizer legs (reports would land on the remote Mac; sanitizers
-# stay on the local-simulator workflow). bundleMode matches the local
-# workflow: one leg per run, false (Legacy Eval) by default.
-name: Runtime tests iOS (remote simulator)
+name: Remote runtime tests iOS
 env:
   YARN_ENABLE_HARDENED_MODE: 0
 on:
-  # TEMP (fork testing only): run on every push of this branch.
   push:
     branches:
       - ci/split-fork-test
@@ -94,11 +69,11 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Single leg per run, selected by the input (default false = Legacy
-      # Eval, matching runtime-tests-ios.yml). PR-style [false, true]
-      # fan-out is a promotion-time decision — it doubles cloud machine use.
+      # Pushes fan out over both bundle modes (like the local workflow's PR
+      # runs); workflow_call/dispatch collapse to the single input-selected
+      # leg so callers keep explicit control.
       matrix:
-        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
+        bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
@@ -121,7 +96,8 @@ jobs:
           # bundleMode is part of the key because toggle-bundle-mode mutates
           # sources AFTER this hash is computed — without it, the Legacy Eval
           # leg would silently reuse a Bundle Mode app from cache.
-          key: runtime-tests-app-zip-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}-${{ hashFiles(
+          key:
+            runtime-tests-app-zip-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}-${{ hashFiles(
             'yarn.lock',
             'apps/fabric-example/**',
             'apps/common-app/**',
@@ -191,8 +167,12 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      # Each leg acquires its own cloud Mac at login. Pool capacity is not
+      # confirmed for concurrent acquires, so the legs run one at a time —
+      # lift max-parallel once the cloud team confirms the pool holds >= 2.
+      max-parallel: 1
       matrix:
-        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
+        bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
