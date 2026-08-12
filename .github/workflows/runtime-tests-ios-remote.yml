@@ -1,7 +1,7 @@
 # EXPERIMENTAL — iOS runtime tests with the test job on Ubuntu, driving a
 # remote simulator on argent cloud.
 #
-# Same artifact hand-off as runtime-tests-ios-split.yml, but run-tests runs on
+# Build job produces a self-contained app zip; run-tests-remote runs on
 # ubuntu-latest with no simulator of its own: scripts/runtime-tests-remote.sh
 # uploads the app to the cloud sim over QUIC (sim-remote simctl install),
 # selects the library via launchd env (sim-remote setenv), reverse-tunnels the
@@ -16,6 +16,12 @@
 # They are set at the job level (not per step) on purpose — the daemon is
 # spawned by whichever sim-remote call runs first and then outlives that
 # step, so every step must offer the same credentials.
+#
+# Scope vs runtime-tests-ios.yml: Release* configurations only (Debug needs
+# Metro at app launch — possible over a tunnel, deliberately unsupported),
+# and no sanitizer legs (reports would land on the remote Mac; sanitizers
+# stay on the local-simulator workflow). bundleMode matches the local
+# workflow: one leg per run, false (Legacy Eval) by default.
 name: Runtime tests iOS (remote simulator)
 env:
   YARN_ENABLE_HARDENED_MODE: 0
@@ -24,8 +30,27 @@ on:
   push:
     branches:
       - ci/split-fork-test
+  workflow_call:
+    inputs:
+      bundleMode:
+        required: false
+        type: boolean
+        default: false
+      configuration:
+        required: false
+        type: string
+        default: ReleaseRuntimeTests
+      udid:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
+      bundleMode:
+        description: Run with Bundle Mode enabled (false = Legacy Eval)
+        required: false
+        type: boolean
+        default: false
       configuration:
         description: Build configuration (must be self-contained, i.e. Release*)
         required: false
@@ -41,7 +66,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: runtime-tests-ios-remote-${{ github.ref }}
+  group: runtime-tests-ios-remote-${{ github.ref }}-${{ inputs.bundleMode }}-${{ inputs.configuration || 'ReleaseRuntimeTests' }}
   cancel-in-progress: true
 
 jobs:
@@ -64,8 +89,16 @@ jobs:
 
   build-app:
     needs: preflight
+    name: Build app (${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
     runs-on: macos-26
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # Single leg per run, selected by the input (default false = Legacy
+      # Eval, matching runtime-tests-ios.yml). PR-style [false, true]
+      # fan-out is a promotion-time decision — it doubles cloud machine use.
+      matrix:
+        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
@@ -85,7 +118,10 @@ jobs:
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
         with:
           path: apps/fabric-example/dist/FabricExample.app.zip
-          key: runtime-tests-app-zip-${{ env.CONFIGURATION }}-${{ hashFiles(
+          # bundleMode is part of the key because toggle-bundle-mode mutates
+          # sources AFTER this hash is computed — without it, the Legacy Eval
+          # leg would silently reuse a Bundle Mode app from cache.
+          key: runtime-tests-app-zip-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}-${{ hashFiles(
             'yarn.lock',
             'apps/fabric-example/**',
             'apps/common-app/**',
@@ -102,6 +138,13 @@ jobs:
       - name: Install monorepo node dependencies
         if: steps.appcache.outputs.cache-hit != 'true'
         run: yarn install --immutable
+
+      # The repo tree ships with Bundle Mode applied; this reverts the
+      # patches for the Legacy Eval leg (same semantics as the local
+      # workflow's step of the same name).
+      - name: Toggle Bundle Mode off (Legacy Eval)
+        if: steps.appcache.outputs.cache-hit != 'true' && !matrix.bundleMode
+        run: yarn toggle-bundle-mode
 
       - name: Build Reanimated package
         if: steps.appcache.outputs.cache-hit != 'true'
@@ -136,15 +179,20 @@ jobs:
       - name: Upload app artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}
+          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}
           path: apps/fabric-example/dist/FabricExample.app.zip
           if-no-files-found: error
           retention-days: 3
 
   run-tests-remote:
     needs: build-app
+    name: Remote tests (${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
     runs-on: ubuntu-latest # <- the whole point: no macOS, no local simulator
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ inputs.configuration || 'ReleaseRuntimeTests' }}
@@ -180,6 +228,7 @@ jobs:
       # Credentials come from SIM_ROUTER_USERNAME / SIM_ROUTER_API_KEY in
       # the job env — clap env fallbacks, so no flags needed.
       - name: Log in and acquire a cloud machine
+        shell: bash # explicit: adds pipefail, so the sim-remote|jq pipe can't hide a failure
         run: |
           sim-remote login
           sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
@@ -188,7 +237,7 @@ jobs:
       - name: Download app artifact
         uses: actions/download-artifact@448e3f862ab3ef47aa50ff917776823c9946035b
         with:
-          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}
+          name: runtime-tests-app-remote-${{ env.CONFIGURATION }}-bundle-${{ matrix.bundleMode }}
           path: apps/fabric-example/dist
 
       - name: Unpack app artifact
@@ -205,18 +254,12 @@ jobs:
         env:
           INPUT_UDID: ${{ inputs.udid }}
         run: |
-          UDID="$INPUT_UDID"
-
-          if [ -z "$UDID" ]; then
-            UDID=$(sim-remote simctl list devices --json \
-              | jq -r '[.devices[][] | select(.isAvailable != false)
-                        | select(.name | startswith("iPhone"))]
-                       | sort_by(.state != "Booted") | .[0].udid // empty')
-          fi
-
-          if [ -z "$UDID" ]; then
-            echo "::error::no available remote iPhone simulator found"
-            exit 1
+          # Device-pick logic lives in the driver (`pick` subcommand) so it
+          # is testable and reusable outside CI.
+          if [ -n "$INPUT_UDID" ]; then
+            UDID=$(scripts/runtime-tests-remote.sh pick --udid "$INPUT_UDID")
+          else
+            UDID=$(scripts/runtime-tests-remote.sh pick)
           fi
 
           echo "using remote simulator $UDID"
