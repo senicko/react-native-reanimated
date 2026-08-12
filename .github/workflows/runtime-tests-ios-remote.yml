@@ -163,7 +163,7 @@ jobs:
     needs: build-app
     name: Remote tests (${{ matrix.configuration }}, ${{ matrix.bundleMode && 'Bundle Mode' || 'Legacy Eval' }})
     runs-on: ubuntu-latest # <- the whole point: no macOS, no local simulator
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       # Legs run in parallel; each acquires its own cloud Mac at login.
