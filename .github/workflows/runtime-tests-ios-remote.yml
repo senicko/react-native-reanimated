@@ -166,10 +166,10 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      # Each leg acquires its own cloud Mac at login. Pool capacity is not
-      # confirmed for concurrent acquires, so the legs run one at a time —
-      # lift max-parallel once the cloud team confirms the pool holds >= 2.
-      max-parallel: 1
+      # Legs run in parallel; each acquires its own cloud Mac at login.
+      # When the pool has fewer free machines than legs, the surplus legs
+      # wait in the router's acquire queue (see the login step's --timeout)
+      # instead of being serialized here.
       matrix:
         bundleMode: ${{ fromJSON(github.event_name == 'push' && '[false, true]' || format('[{0}]', inputs.bundleMode || false)) }}
         configuration: ${{ fromJSON(github.event_name == 'push' && '["DebugRuntimeTests", "ReleaseRuntimeTests"]' || format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
@@ -204,7 +204,10 @@ jobs:
       - name: Log in and acquire a cloud machine
         shell: bash # explicit: adds pipefail, so the sim-remote|jq pipe can't hide a failure
         run: |
-          sim-remote login
+          # --timeout is the queue: when all pool machines are busy (e.g.
+          # sibling matrix legs hold them), this leg waits up to 30 min for
+          # a free one instead of failing after the default 120 s.
+          sim-remote login --timeout 1800
           sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
           echo "logged in, machine acquired"
 
