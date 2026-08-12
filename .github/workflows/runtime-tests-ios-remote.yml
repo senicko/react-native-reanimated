@@ -64,7 +64,6 @@ jobs:
 
   build-app:
     needs: preflight
-    # TEMP (fork testing only): upstream repo guard removed so the job runs on forks.
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -162,11 +161,11 @@ jobs:
       - name: Install monorepo node dependencies
         run: yarn install --immutable
 
+      # CLI and daemon must be siblings — the CLI spawns
+      # the daemon (which owns the QUIC session and the reverse tunnels)
+      # from its own directory.
       - name: Install sim-remote CLI + daemon
         run: |
-          # Public release. CLI and daemon must be siblings — the CLI spawns
-          # the daemon (which owns the QUIC session and the reverse tunnels)
-          # from its own directory.
           TARGET=x86_64-unknown-linux-gnu # ubuntu-latest runners are x86_64
           REL="https://github.com/software-mansion/sim-remote-releases/releases/download/softu"
           mkdir -p "$HOME/.local/bin"
@@ -174,17 +173,15 @@ jobs:
           curl -fsSL -o "$HOME/.local/bin/sim-remote-daemon" "$REL/sim-remote-daemon-$TARGET"
           chmod +x "$HOME/.local/bin/sim-remote" "$HOME/.local/bin/sim-remote-daemon"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          # smoke check: the CLI has no --version flag; --help exits 0
           "$HOME/.local/bin/sim-remote" --help > /dev/null
 
+      # `sim-remote login` authenticates against sim-router AND acquires a
+      # Mac from the pool (waits up to 120 s for a free one by default).
+      # Credentials come from SIM_ROUTER_USERNAME / SIM_ROUTER_API_KEY in
+      # the job env — clap env fallbacks, so no flags needed.
       - name: Log in and acquire a cloud machine
         run: |
-          # `sim-remote login` authenticates against sim-router AND acquires a
-          # Mac from the pool (waits up to 120 s for a free one by default).
-          # Credentials come from SIM_ROUTER_USERNAME / SIM_ROUTER_API_KEY in
-          # the job env — clap env fallbacks, so no flags needed.
           sim-remote login
-          # The acquired machine's simulators are now visible:
           sim-remote simctl list devices --json | jq -e '.devices' > /dev/null
           echo "logged in, machine acquired"
 
@@ -209,18 +206,22 @@ jobs:
           INPUT_UDID: ${{ inputs.udid }}
         run: |
           UDID="$INPUT_UDID"
+
           if [ -z "$UDID" ]; then
             UDID=$(sim-remote simctl list devices --json \
               | jq -r '[.devices[][] | select(.isAvailable != false)
                         | select(.name | startswith("iPhone"))]
                        | sort_by(.state != "Booted") | .[0].udid // empty')
           fi
+
           if [ -z "$UDID" ]; then
             echo "::error::no available remote iPhone simulator found"
             exit 1
           fi
+
           echo "using remote simulator $UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
           scripts/runtime-tests-remote.sh install --udid "$UDID" \
             --app-path dist/unpacked/FabricExample.app
 
@@ -259,11 +260,12 @@ jobs:
         working-directory: ${{ env.WORKING_DIRECTORY }}
         run: |
           UDID="${{ steps.sim.outputs.udid }}"
+
           if command -v sim-remote >/dev/null; then
             if [ -n "$UDID" ]; then
               sim-remote proxy stop "$UDID" 8082 || true
               sim-remote simctl shutdown "$UDID" || true
             fi
-            # End the session and hand the machine back to the pool.
+
             sim-remote logout || true
           fi

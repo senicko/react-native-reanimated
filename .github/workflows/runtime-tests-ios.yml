@@ -21,7 +21,7 @@ on:
       sanitizer:
         required: false
         type: string
-        default: ''
+        default: ""
   workflow_dispatch:
     inputs:
       bundleMode:
@@ -35,7 +35,7 @@ on:
       sanitizer:
         required: false
         type: string
-        default: ''
+        default: ""
 
 permissions:
   contents: read
