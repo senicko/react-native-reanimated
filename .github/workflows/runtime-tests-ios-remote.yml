@@ -206,19 +206,8 @@ jobs:
         if: ${{ !matrix.bundleMode && startsWith(matrix.configuration, 'Debug') }}
         run: yarn toggle-bundle-mode
 
-      # CLI and daemon must be siblings — the CLI spawns
-      # the daemon (which owns the QUIC session and the reverse tunnels)
-      # from its own directory.
       - name: Install sim-remote CLI + daemon
-        run: |
-          TARGET=x86_64-unknown-linux-gnu # ubuntu-latest runners are x86_64
-          REL="https://github.com/software-mansion/sim-remote-releases/releases/download/softu"
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL -o "$HOME/.local/bin/sim-remote" "$REL/sim-remote-$TARGET"
-          curl -fsSL -o "$HOME/.local/bin/sim-remote-daemon" "$REL/sim-remote-daemon-$TARGET"
-          chmod +x "$HOME/.local/bin/sim-remote" "$HOME/.local/bin/sim-remote-daemon"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/sim-remote" --help > /dev/null
+        uses: ./.github/actions/install-sim-remote
 
       # `sim-remote login` authenticates against sim-router AND acquires a
       # Mac from the pool (waits up to 120 s for a free one by default).
