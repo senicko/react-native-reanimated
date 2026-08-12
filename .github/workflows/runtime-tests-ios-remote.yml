@@ -45,9 +45,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fail in seconds — not after a 40-minute macOS build — when the cloud
-  # credentials aren't configured. (The secrets context is not available in
-  # job-level `if:`, hence the env indirection.)
+  # Check if we have all must-have credentials
+  # before running the workflow.
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 5
