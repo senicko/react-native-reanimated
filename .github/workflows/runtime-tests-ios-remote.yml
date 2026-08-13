@@ -2,6 +2,9 @@ name: Remote runtime tests iOS
 env:
   YARN_ENABLE_HARDENED_MODE: 0
 on:
+  push:
+    branches:
+      - ci/ci-test
   workflow_call:
     secrets:
       SIM_ROUTER_USERNAME:
@@ -45,7 +48,6 @@ permissions:
 jobs:
   # Check if we have all must-have credentials before running the workflow.
   preflight:
-    if: github.repository == 'software-mansion/react-native-reanimated'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -71,8 +73,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
-        configuration: ${{ fromJSON(format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
+        bundleMode: [true, false]
+        configuration: [ReleaseRuntimeTests, DebugRuntimeTests]
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ matrix.configuration }}
@@ -168,8 +170,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        bundleMode: ${{ fromJSON(format('[{0}]', inputs.bundleMode || false)) }}
-        configuration: ${{ fromJSON(format('["{0}"]', inputs.configuration || 'ReleaseRuntimeTests')) }}
+        bundleMode: [true, false]
+        configuration: [ReleaseRuntimeTests, DebugRuntimeTests]
     env:
       WORKING_DIRECTORY: apps/fabric-example
       CONFIGURATION: ${{ matrix.configuration }}
